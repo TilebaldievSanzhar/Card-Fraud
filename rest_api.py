@@ -1,0 +1,135 @@
+import os
+
+from flask import Flask, jsonify, abort, make_response, request
+import requests
+import json
+import time
+import sys
+import pandas as pd
+import model as M
+import preprocessing as P
+import copy
+import logging
+logging.basicConfig(filename='logs/logs.log', level=logging.DEBUG)
+
+from rq import Queue, get_current_job
+from redis import Redis
+redis_conn = Redis(host='app-redis', port=6379)
+queue = Queue('rest_api', connection=redis_conn, default_timeout=1200)
+
+app = Flask(__name__)
+
+preprocessing = P.load_preprocessing()
+model = M.load_model()
+targets = ['NO', 'YES']
+
+def get_pred(user_id,card_id,amount,use_chip,merchant_name,
+                merchant_city,merchant_state,mcc,errors,zip_code,timestamp):
+
+    logging.info('Prediction ...')
+
+    all_collumns = ['user_id', 'card_id', 'amount', 'use_chip', 'merchant_name',
+                'merchant_city', 'merchant_state' , 'mcc', 'errors', 'zip_code', 'timestamp']
+    lst = [user_id,card_id,amount,use_chip,merchant_name,
+                merchant_city,merchant_state,mcc,errors,zip_code,timestamp]
+    df = pd.DataFrame([lst], columns = all_collumns)
+
+    result = model.predict_proba(df)
+    predx = ['%.3f' % elem for elem in result[0]]
+    preds_concat = pd.concat([pd.Series(targets), pd.Series(predx)], axis=1)
+    preds = pd.DataFrame(data=preds_concat)
+    preds.columns = ['class', 'probability']
+    return preds.reset_index(drop=True)
+
+
+def launch_task(user_id,card_id,amount,use_chip,merchant_name,
+                merchant_city,merchant_state,mcc,errors,zip_code,timestamp,api, job_id):
+
+    job = get_current_job()
+
+    pred_model = get_pred(user_id,card_id,amount,use_chip,merchant_name,
+                merchant_city,merchant_state,mcc,errors,zip_code,timestamp)
+
+    if api == 'v1.0':
+        logging.info('Launch Task')
+        res_dict = {'result': json.loads(pd.DataFrame(pred_model).to_json(orient='records'))}
+        return res_dict
+    else:
+        res_dict = {'error': 'API doesnt exist'}
+        logging.warning('API doesnt exist')
+        return res_dict
+
+def get_response(dict, status=200):
+    return make_response(jsonify(dict), status)
+
+def get_job_response(job_id):
+    return get_response({'job_id': job_id})
+
+@app.route('/api/v1.0/getpred', methods=['GET'])
+def get_task():
+
+    job_id = request.args.get('job_id')
+    job=queue.enqueue(request.args.get('user_id'),request.args.get('card_id'),request.args.get('amount'),
+                       request.args.get('use_chip'),request.args.get('merchant_name'),request.args.get('merchant_name'),
+                       request.args.get('merchant_name'),request.args.get('merchant_name'),request.args.get('merchant_name'),
+                       request.args.get('merchant_name'),request.args.get('merchant_name'),'v1.0', job_id, result_ttl=60*60*24,
+                      job_id=job_id)
+
+    return get_job_response(job.get_id())
+
+def get_process_response(code, process_status, status=200):
+    return get_response({
+        'code': code,
+        'status': process_status
+    }, status)
+
+@app.route('/api/status/<id>')
+def status(id):
+    job = queue.fetch_job(id)
+
+    if (job is None):
+        return get_process_response('NOT_FOUND', 'error', 404)
+
+    if (job.is_failed):
+        return get_process_response('INTERNAL_SERVER_ERROR', 'error', 500)
+
+    if (job.is_finished):
+        return get_process_response('READY', 'success')
+
+    return get_process_response('NOT_READY', 'running', 202)
+
+
+@app.route('/api/result/<id>')
+def result(id):
+    job = queue.fetch_job(id)
+
+    if job is None:
+        return get_process_response('NOT_FOUND', 'error', 404)
+
+    if job.is_failed:
+        return get_process_response('INTERNAL_SERVER_ERROR', 'error', 500)
+
+    if job.is_finished:
+        job_result = copy.deepcopy(job.result)
+        result = {
+            'result': job_result['result']
+        }
+
+        return get_response(result)
+
+    return get_process_response('NOT_FOUND', 'error', 404)
+
+
+@app.errorhandler(404)
+def not_found(error):
+    logging.warning('PAGE NOT FOUND')
+    return make_response(jsonify({'code': 'PAGE_NOT_FOUND'}), 404)
+
+
+@app.errorhandler(500)
+def server_error(error):
+    logging.warning('INTERNAL SERVER ERROR')
+    return make_response(jsonify({'code': 'INTERNAL_SERVER_ERROR'}), 500)
+
+if __name__ == '__main__':
+    app.run(port=5000, debug=True)
