@@ -23,18 +23,13 @@ preprocessing = P.load_preprocessing()
 model = M.load_model()
 targets = ['NO', 'YES']
 
-def get_pred(user_id,card_id,amount,use_chip,merchant_name,
-                merchant_city,merchant_state,mcc,errors,zip_code,timestamp):
+def get_pred(df):
 
     logging.info('Prediction ...')
 
-    all_collumns = ['user_id', 'card_id', 'amount', 'use_chip', 'merchant_name',
-                'merchant_city', 'merchant_state' , 'mcc', 'errors', 'zip_code', 'timestamp']
-    lst = [user_id,card_id,amount,use_chip,merchant_name,
-                merchant_city,merchant_state,mcc,errors,zip_code,timestamp]
-    df = pd.DataFrame([lst], columns = all_collumns)
-
-    result = model.predict_proba(df)
+    df = df
+    df_preprocessing = preprocessing.transform(df)
+    result = model.predict_proba(df_preprocessing)
     predx = ['%.3f' % elem for elem in result[0]]
     preds_concat = pd.concat([pd.Series(targets), pd.Series(predx)], axis=1)
     preds = pd.DataFrame(data=preds_concat)
@@ -42,13 +37,11 @@ def get_pred(user_id,card_id,amount,use_chip,merchant_name,
     return preds.reset_index(drop=True)
 
 
-def launch_task(user_id,card_id,amount,use_chip,merchant_name,
-                merchant_city,merchant_state,mcc,errors,zip_code,timestamp,api, job_id):
+def launch_task(df,api, job_id):
 
     job = get_current_job()
 
-    pred_model = get_pred(user_id,card_id,amount,use_chip,merchant_name,
-                merchant_city,merchant_state,mcc,errors,zip_code,timestamp)
+    pred_model = get_pred(df)
 
     if api == 'v1.0':
         logging.info('Launch Task')
@@ -69,10 +62,7 @@ def get_job_response(job_id):
 def get_task():
 
     job_id = request.args.get('job_id')
-    job=queue.enqueue(request.args.get('user_id'),request.args.get('card_id'),request.args.get('amount'),
-                       request.args.get('use_chip'),request.args.get('merchant_name'),request.args.get('merchant_name'),
-                       request.args.get('merchant_name'),request.args.get('merchant_name'),request.args.get('merchant_name'),
-                       request.args.get('merchant_name'),request.args.get('merchant_name'),'v1.0', job_id, result_ttl=60*60*24,
+    job=queue.enqueue('rest_api.launch_task', request.args.get('df'), 'v1.0', job_id, result_ttl=60*60*24,
                       job_id=job_id)
 
     return get_job_response(job.get_id())
